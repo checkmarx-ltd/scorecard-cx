@@ -31,7 +31,7 @@ jobs:
       hashes: ${{ steps.hash.outputs.hashes }}
     permissions:
       contents: write  # for goreleaser/goreleaser-action to create a GitHub release
-    runs-on: ubuntu-latest
+    runs-on: cx-public-ubuntu-x64
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@eb238b55efaa70779f274895e782ed17c84f2895 # v1
@@ -82,11 +82,11 @@ jobs:
 
   verification:
     needs: [goreleaser, provenance]
-    runs-on: ubuntu-latest
+    runs-on: cx-public-ubuntu-x64
     permissions: read-all
     steps:
       - name: Install the verifier
-        uses: slsa-framework/slsa-verifier/actions/installer@v2.4.1
+        uses: slsa-framework/slsa-verifier/actions/installer@7e1e47d7d793930ab0082c15c2b971fdb53a3c95 # v2.4.1
 
       - name: Download assets
         env:

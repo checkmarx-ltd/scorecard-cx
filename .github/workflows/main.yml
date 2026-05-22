@@ -32,7 +32,7 @@ env:
 jobs:
   unit-test:
     name: unit-test
-    runs-on: ubuntu-latest
+    runs-on: cx-public-ubuntu-x64
     permissions:
       contents: read
     steps:
@@ -90,7 +90,7 @@ jobs:
          verbose: true
   generate-mocks:
     name: generate-mocks
-    runs-on: ubuntu-latest
+    runs-on: cx-public-ubuntu-x64
     permissions:
       contents: read
     steps:
@@ -138,7 +138,7 @@ jobs:
             make generate-mocks
   generate-docs:
     name: generate-docs
-    runs-on: ubuntu-latest
+    runs-on: cx-public-ubuntu-x64
     permissions:
       contents: read
     steps:
@@ -167,7 +167,7 @@ jobs:
        run: git diff --exit-code
   build-proto:
     name: build-proto
-    runs-on: ubuntu-latest
+    runs-on: cx-public-ubuntu-x64
     permissions:
       contents: read
     steps:
@@ -215,7 +215,7 @@ jobs:
           - 'build-add-script'
           - 'build-validate-script'
     name: ${{ matrix.target }}
-    runs-on: ubuntu-latest
+    runs-on: cx-public-ubuntu-x64
     needs: build-proto
     permissions:
       contents: read
@@ -255,7 +255,7 @@ jobs:
             make ${{ matrix.target }}
   validate-docs:
     name: validate-docs
-    runs-on: ubuntu-latest
+    runs-on: cx-public-ubuntu-x64
     permissions:
       contents: read
     steps:
@@ -297,7 +297,7 @@ jobs:
             make validate-docs
   add-projects:
     name: add-projects
-    runs-on: ubuntu-latest
+    runs-on: cx-public-ubuntu-x64
     permissions:
       contents: read
     steps:
@@ -325,7 +325,7 @@ jobs:
             git diff --exit-code
   validate-projects:
     name: validate-projects
-    runs-on: ubuntu-latest
+    runs-on: cx-public-ubuntu-x64
     permissions:
       contents: read
     steps:
@@ -360,7 +360,7 @@ jobs:
             make validate-projects
   license-check:
     name: license boilerplate check
-    runs-on: ubuntu-latest
+    runs-on: cx-public-ubuntu-x64
     permissions:
       contents: read
     steps:
