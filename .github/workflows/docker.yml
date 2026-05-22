@@ -28,7 +28,7 @@ env:
 jobs:
   docs_only_check:
     name: Check for docs-only change
-    runs-on: ubuntu-latest
+    runs-on: cx-public-ubuntu-x64
     permissions:
       contents: read
     outputs:
@@ -61,7 +61,7 @@ jobs:
           - 'cron-github-server-docker'
           - 'build-attestor-docker'
     name: ${{ matrix.target }}
-    runs-on: ubuntu-latest
+    runs-on: cx-public-ubuntu-x64
     permissions:
       contents: read
     needs: docs_only_check

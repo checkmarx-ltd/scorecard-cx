@@ -29,7 +29,7 @@ env:
 
 jobs:
   gitlab-integration-trusted:
-    runs-on: ubuntu-latest
+    runs-on: cx-public-ubuntu-x64
     environment: gitlab
     steps:
       - name: Harden Runner

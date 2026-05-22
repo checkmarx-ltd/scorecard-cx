@@ -23,16 +23,16 @@ permissions:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: cx-public-ubuntu-x64
     env:
       CGO_ENABLED: "0"
       GH_TOKEN: ${{ secrets.GH_TOKEN }}
     steps:
       - name: Checkout (branch that triggered the run)
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
 

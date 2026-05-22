@@ -11,7 +11,7 @@ env:
 jobs:
   share-link:
     if: ${{ (github.event.issue.pull_request) && (contains(github.event.comment.body, '/scdiff generate')) }}
-    runs-on: [ubuntu-latest]
+    runs-on: [cx-public-ubuntu-x64]
     permissions:
       pull-requests: write # to create the PR comment
     steps:
@@ -28,7 +28,7 @@ jobs:
 
   golden-test:
     if: ${{ (github.event.issue.pull_request) && (contains(github.event.comment.body, '/scdiff generate')) }}
-    runs-on: [ubuntu-latest]
+    runs-on: [cx-public-ubuntu-x64]
     steps:
       - name: create file of repos to analyze
         run: |
