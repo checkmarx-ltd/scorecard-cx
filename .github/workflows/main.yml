@@ -68,7 +68,7 @@ jobs:
      - name: Run unit-tests
        run: make unit-test
      - name: Upload codecoverage
-       uses: codecov/codecov-action@4fe8c5f003fae66aa5ebb77cfd3e7bfbbda0b6b0 # 3.1.5
+       uses: step-security/codecov-action@87e66f47a0f8ab4cae465a323eb9ec63d8b6b875 # v6.0.1
        with:
          files: ./unit-coverage.out
          verbose: true
@@ -83,7 +83,7 @@ jobs:
           timeout_minutes: 30
           command: make e2e-pat
      - name: codecov
-       uses: codecov/codecov-action@4fe8c5f003fae66aa5ebb77cfd3e7bfbbda0b6b0 # 2.1.0
+       uses: step-security/codecov-action@87e66f47a0f8ab4cae465a323eb9ec63d8b6b875 # v6.0.1
        if: ${{ github.event_name != 'pull_request' || github.actor != 'dependabot[bot]' }}
        with:
          files: "*e2e-coverage.out"
@@ -100,7 +100,7 @@ jobs:
          egress-policy: audit # TODO: change to 'egress-policy: block' after couple of runs
 
      - name: Install Protoc
-       uses: arduino/setup-protoc@149f6c87b92550901b26acd1632e11c3662e381f # v1.3.0
+       uses: step-security/setup-protoc@d23a2fbf8225f60169d10a2b16a023b0381508bb # v3.0.1
        with:
         version: ${{ env.PROTOC_VERSION }}
         repo-token: ${{ secrets.GITHUB_TOKEN }}
@@ -177,7 +177,7 @@ jobs:
          egress-policy: audit # TODO: change to 'egress-policy: block' after couple of runs
 
      - name: Install Protoc
-       uses: arduino/setup-protoc@149f6c87b92550901b26acd1632e11c3662e381f # v1.3.0
+       uses: step-security/setup-protoc@d23a2fbf8225f60169d10a2b16a023b0381508bb # v3.0.1
        with:
         version: ${{ env.PROTOC_VERSION }}
         repo-token: ${{ secrets.GITHUB_TOKEN }}
@@ -335,7 +335,7 @@ jobs:
          egress-policy: audit # TODO: change to 'egress-policy: block' after couple of runs
 
      - name: Install Protoc
-       uses: arduino/setup-protoc@149f6c87b92550901b26acd1632e11c3662e381f # v1.3.0
+       uses: step-security/setup-protoc@d23a2fbf8225f60169d10a2b16a023b0381508bb # v3.0.1
        with:
         version: ${{ env.PROTOC_VERSION }}
         repo-token: ${{ secrets.GITHUB_TOKEN }}
