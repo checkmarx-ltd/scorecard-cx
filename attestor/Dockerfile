@@ -21,7 +21,9 @@ ARG TARGETOS
 ARG TARGETARCH
 RUN make build-attestor
 
-FROM gcr.io/google-appengine/debian11@sha256:97dc4fbf18419ef928bcddb865ccf0536d4cc39ae3ace5a2b4273c11aedbea82
+FROM scratch
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /src/scorecard/attestor /
+USER 65532:65532
 ENTRYPOINT [ "/scorecard-attestor" ]
 

@@ -24,6 +24,8 @@ ARG TARGETOS
 ARG TARGETARCH
 RUN CGO_ENABLED=0 make build-github-server
 
-FROM gcr.io/distroless/base:nonroot@sha256:29da700a46816467c7cb91058f53eac4170a4a25ac8551d316d9fd38e2c58bdf
+FROM scratch
+COPY --from=authserver /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=authserver /src/clients/githubrepo/roundtripper/tokens/server/github-auth-server clients/githubrepo/roundtripper/tokens/server/github-auth-server
+USER 65532:65532
 ENTRYPOINT ["clients/githubrepo/roundtripper/tokens/server/github-auth-server"]

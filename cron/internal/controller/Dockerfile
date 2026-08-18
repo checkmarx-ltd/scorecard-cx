@@ -30,10 +30,12 @@ ARG TARGETOS
 ARG TARGETARCH
 RUN CGO_ENABLED=0 make build-controller
 
-FROM gcr.io/distroless/base:nonroot@sha256:29da700a46816467c7cb91058f53eac4170a4a25ac8551d316d9fd38e2c58bdf
+FROM scratch
+COPY --from=controller /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY ./cron/internal/data/projects*csv cron/internal/data/
 COPY ./cron/internal/data/gitlab-projects-releasetest.csv cron/internal/data/
 COPY ./cron/internal/data/gitlab-projects.csv cron/internal/data/
 COPY --from=shuffle /src/cron/internal/data/projects.release.csv cron/internal/data/projects.release.csv
 COPY --from=controller /src/cron/internal/controller/controller cron/internal/controller/controller
+USER 65532:65532
 ENTRYPOINT ["cron/internal/controller/controller"]
