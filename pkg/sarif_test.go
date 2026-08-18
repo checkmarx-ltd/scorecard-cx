@@ -819,6 +819,56 @@ func TestSARIFOutput(t *testing.T) {
 				Metadata: []string{},
 			},
 		},
+		{
+			// Check-Name6 is the only check in the "local-scm" category and is disabled,
+			// so its run must still be emitted (see comment in AsSARIF) with an empty
+			// "results" array. This exercises the firstResult==true / no-enabled-entries
+			// branch of writeSarifToWriter, which none of the other cases above reach.
+			name:        "check-9-empty-results",
+			showDetails: true,
+			expected:    "./testdata/check9.sarif",
+			logLevel:    log.DebugLevel,
+			policy: spol.ScorecardPolicy{
+				Version: 1,
+				Policies: map[string]*spol.CheckPolicy{
+					"Check-Name6": {
+						Score: checker.MaxResultScore,
+						Mode:  spol.CheckPolicy_DISABLED,
+					},
+				},
+			},
+			result: ScorecardResult{
+				Repo: RepoInfo{
+					Name:      repoName,
+					CommitSHA: repoCommit,
+				},
+				Scorecard: ScorecardInfo{
+					Version:   scorecardVersion,
+					CommitSHA: scorecardCommit,
+				},
+				Date: date,
+				Checks: []checker.CheckResult{
+					{
+						Details: []checker.CheckDetail{
+							{
+								Type: checker.DetailWarn,
+								Msg: checker.LogMessage{
+									Text:    "warn message",
+									Path:    "src/file1.cpp",
+									Type:    finding.FileTypeSource,
+									Offset:  5,
+									Snippet: "if (bad) {BUG();}",
+								},
+							},
+						},
+						Score:  9,
+						Reason: "half score reason",
+						Name:   "Check-Name6",
+					},
+				},
+				Metadata: []string{},
+			},
+		},
 	}
 	for i := range tests {
 		tt := &tests[i] // Re-initializing variable so it is not changed while executing the closure below
