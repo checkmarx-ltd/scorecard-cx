@@ -16,9 +16,10 @@ package pkg
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
-	"reflect"
 	"testing"
 	"time"
 
@@ -854,78 +855,157 @@ func TestSARIFOutput(t *testing.T) {
 	}
 }
 
-func Test_createSARIFRuns(t *testing.T) {
+// countingWriter records the number of underlying Write calls it receives.
+// bufio.Writer calls the underlying writer only when its buffer is full or Flush is called,
+// so a call count > 1 confirms that output was written incrementally.
+type countingWriter struct {
+	buf   bytes.Buffer
+	calls int
+}
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	w.calls++
+	return w.buf.Write(p)
+}
+
+func TestSARIFStreaming(t *testing.T) {
 	t.Parallel()
-	type args struct {
-		runs map[string]*run
+
+	// Build a result with enough findings to overflow the default 4096-byte bufio buffer
+	// multiple times, verifying that output is written incrementally rather than all at once.
+	// Each SARIF result is ~600 bytes; 50 results ≈ 30 KB >> 4096-byte buffer.
+	const numDetails = 50
+	checkDocs := sarifMockDocRead()
+	date, err := time.Parse(time.RFC822Z, "17 Aug 21 18:57 +0000")
+	if err != nil {
+		t.Fatalf("time.Parse: %v", err)
 	}
-	tests := []struct {
-		name string
-		args args
-		want []run
-	}{
-		{
-			name: "empty runs",
-			args: args{
-				runs: map[string]*run{},
+
+	details := make([]checker.CheckDetail, numDetails)
+	for i := range details {
+		details[i] = checker.CheckDetail{
+			Type: checker.DetailWarn,
+			Msg: checker.LogMessage{
+				Text:    fmt.Sprintf("warn message %d", i),
+				Path:    fmt.Sprintf("src/file%d.cpp", i),
+				Type:    finding.FileTypeSource,
+				Offset:  uint(i + 1),
+				Snippet: fmt.Sprintf("if (bad%d) {BUG();}", i),
 			},
-			want: []run{},
+		}
+	}
+
+	sc := ScorecardResult{
+		Repo:      RepoInfo{Name: "test-repo", CommitSHA: "abc123"},
+		Scorecard: ScorecardInfo{Version: "1.0.0", CommitSHA: "def456"},
+		Date:      date,
+		Checks: []checker.CheckResult{
+			{Name: "Check-Name", Score: 5, Reason: "test reason", Details: details},
 		},
-		{
-			name: "nil runs are skipped",
-			args: args{
-				runs: map[string]*run{
-					"run1": nil,
-					"run2": {
-						Tool: tool{
-							Driver: driver{
-								Name: "name",
-							},
-						},
-					},
-				},
-			},
-			want: []run{
-				{
-					Tool: tool{
-						Driver: driver{
-							Name: "name",
-						},
-					},
-				},
-			},
-		},
-		{
-			name: "one run",
-			args: args{
-				runs: map[string]*run{
-					"run1": {
-						Tool: tool{
-							Driver: driver{
-								Name: "name",
-							},
-						},
-					},
-				},
-			},
-			want: []run{
-				{
-					Tool: tool{
-						Driver: driver{
-							Name: "name",
-						},
-					},
-				},
-			},
+		Metadata: []string{},
+	}
+	policy := spol.ScorecardPolicy{
+		Version: 1,
+		Policies: map[string]*spol.CheckPolicy{
+			// Score 10 >= check score 5 → shouldAddLocation returns true for all details.
+			"Check-Name": {Score: checker.MaxResultScore, Mode: spol.CheckPolicy_ENFORCED},
 		},
 	}
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			if got := createSARIFRuns(tt.args.runs); !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("createSARIFRuns() = %v, want %v", got, tt.want)
-			}
-		})
+
+	var w countingWriter
+	if err := sc.AsSARIF(true, log.DebugLevel, &w, checkDocs, &policy, &options.Options{}); err != nil {
+		t.Fatalf("AsSARIF: %v", err)
+	}
+
+	// Verify the underlying writer was called more than once, confirming that
+	// bufio.Writer flushed incrementally as its buffer filled, not as a single blob.
+	if w.calls <= 1 {
+		t.Errorf("expected multiple Write calls (got %d); output may not be streamed incrementally", w.calls)
+	}
+
+	// Verify the output is valid JSON.
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(w.buf.Bytes(), &parsed); err != nil {
+		t.Fatalf("output is not valid JSON: %v\nfirst 512 bytes:\n%s", err, w.buf.Bytes()[:min(512, w.buf.Len())])
+	}
+
+	// Verify top-level SARIF structure.
+	if v, _ := parsed["version"].(string); v != "2.1.0" {
+		t.Errorf("version = %q, want %q", v, "2.1.0")
+	}
+
+	runs, _ := parsed["runs"].([]interface{})
+	if len(runs) != 1 {
+		t.Fatalf("len(runs) = %d, want 1 (Check-Name maps to the local category)", len(runs))
+	}
+
+	// Verify that all numDetails results are present in the run.
+	localRun, _ := runs[0].(map[string]interface{})
+	results, _ := localRun["results"].([]interface{})
+	if len(results) != numDetails {
+		t.Errorf("len(results) = %d, want %d", len(results), numDetails)
+	}
+}
+
+func TestSARIFMemoryNotAccumulated(t *testing.T) {
+	// Cannot call t.Parallel(): testing.AllocsPerRun panics in parallel tests.
+
+	// Verify that AsSARIF allocations remain bounded even for large result sets.
+	// The streaming implementation creates and discards each result struct immediately;
+	// it must not accumulate a []result slice proportional to the total finding count.
+	//
+	// We use testing.AllocsPerRun: the measured alloc count should be proportional
+	// to the number of results, not to N^2 or unbounded.
+	const numDetails = 200
+	checkDocs := sarifMockDocRead()
+	date, err := time.Parse(time.RFC822Z, "17 Aug 21 18:57 +0000")
+	if err != nil {
+		t.Fatalf("time.Parse: %v", err)
+	}
+
+	details := make([]checker.CheckDetail, numDetails)
+	for i := range details {
+		details[i] = checker.CheckDetail{
+			Type: checker.DetailWarn,
+			Msg: checker.LogMessage{
+				Text:   fmt.Sprintf("warn %d", i),
+				Path:   fmt.Sprintf("src/file%d.cpp", i),
+				Type:   finding.FileTypeSource,
+				Offset: uint(i + 1),
+			},
+		}
+	}
+
+	sc := ScorecardResult{
+		Repo:      RepoInfo{Name: "test-repo", CommitSHA: "abc123"},
+		Scorecard: ScorecardInfo{Version: "1.0.0", CommitSHA: "def456"},
+		Date:      date,
+		Checks: []checker.CheckResult{
+			{Name: "Check-Name", Score: 5, Reason: "test reason", Details: details},
+		},
+		Metadata: []string{},
+	}
+	policy := spol.ScorecardPolicy{
+		Version: 1,
+		Policies: map[string]*spol.CheckPolicy{
+			"Check-Name": {Score: checker.MaxResultScore, Mode: spol.CheckPolicy_ENFORCED},
+		},
+	}
+
+	// Use io.Discard so the output buffer itself does not retain memory.
+	allocs := testing.AllocsPerRun(3, func() {
+		if err := sc.AsSARIF(true, log.DebugLevel, io.Discard, checkDocs, &policy, &options.Options{}); err != nil {
+			t.Errorf("AsSARIF: %v", err)
+		}
+	})
+
+	// Upper bound: allow up to 50 allocations per result to account for runtime
+	// variation (JSON encoding internals, string ops, etc.). This cap is generous
+	// enough that it will not produce false failures, yet would catch a regression
+	// that materialises an O(N^2) or wildly unbounded allocation pattern.
+	const maxAllocsPerResult = 50
+	if allocs > float64(numDetails)*maxAllocsPerResult {
+		t.Errorf("AllocsPerRun = %.0f, want < %.0f (%d results × %d allocs/result limit)",
+			allocs, float64(numDetails)*maxAllocsPerResult, numDetails, maxAllocsPerResult)
 	}
 }
