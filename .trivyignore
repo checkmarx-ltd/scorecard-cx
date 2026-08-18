@@ -1,4 +1,4 @@
 # Ignore misconfigurations
 # GHSA-xr7q-jx4m-x55m exp:2024-10-14 # Example
-CVE-2026-34040 exp:2026-04-25 # github.com/docker/docker v28.5.2+incompatible - indirect dependency in tools/go.mod
-CVE-2026-33997 exp:2026-04-25 # github.com/docker/docker v28.5.2+incompatible - indirect dependency in tools/go.mod
+CVE-2026-34040 exp:2026-12-31 # github.com/docker/docker v28.5.2+incompatible - indirect dependency in tools/go.mod, fixed version v29.3.1 not yet published upstream
+CVE-2026-33997 exp:2026-12-31 # github.com/docker/docker v28.5.2+incompatible - indirect dependency in tools/go.mod, fixed version v29.3.1 not yet published upstream
