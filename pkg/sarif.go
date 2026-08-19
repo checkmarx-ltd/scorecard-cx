@@ -15,6 +15,7 @@
 package pkg
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -149,12 +150,6 @@ type run struct {
 	Artifacts string `json:"artifacts,omitempty"`
 	// This MUST never be omitted or set as `nil`.
 	Results []result `json:"results"`
-}
-
-type sarif210 struct {
-	Schema  string `json:"$schema"`
-	Version string `json:"version"`
-	Runs    []run  `json:"runs"`
 }
 
 func calculateSeverityLevel(risk string) string {
@@ -401,14 +396,6 @@ func addDefaultLocation(locs []location, policyFile string) []location {
 	return locs
 }
 
-func createSARIFHeader() sarif210 {
-	return sarif210{
-		Schema:  "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
-		Version: "2.1.0",
-		Runs:    []run{},
-	}
-}
-
 func createSARIFTool(url, name, version string) tool {
 	titleCaser := cases.Title(language.English)
 
@@ -435,18 +422,6 @@ func createSARIFRun(uri, toolName, version, commit string, t time.Time,
 			ID: fmt.Sprintf("%s/%s/%s", category, runName, fmt.Sprintf("%s-%s", commit, t.Format(time.RFC822Z))),
 		},
 	}
-}
-
-func getOrCreateSARIFRun(runs map[string]*run, runName string,
-	uri, toolName, version, commit string, t time.Time,
-	category string,
-) *run {
-	if prun, exists := runs[runName]; exists {
-		return prun
-	}
-	run := createSARIFRun(uri, toolName, version, commit, t, category, runName)
-	runs[runName] = &run
-	return &run
 }
 
 func generateRemediationMarkdown(remediation []string) string {
@@ -557,27 +532,6 @@ func computeCategory(checkName string, repos []string) (string, error) {
 	}
 }
 
-// createSARIFRuns takes a map of runs and returns a sorted slice of runs.
-// It sorts the keys of the map, iterates over them, and appends the corresponding run to the result slice.
-// If the run is nil, it is skipped.
-func createSARIFRuns(runs map[string]*run) []run {
-	res := []run{}
-	// Sort keys.
-	keys := make([]string, 0)
-	for k := range runs {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	// Iterate over keys.
-	for _, k := range keys {
-		if runs[k] != nil {
-			res = append(res, *runs[k])
-		}
-	}
-	return res
-}
-
 func createCheckIdentifiers(name string) (string, string) {
 	// Identifier must be in Pascal case.
 	// We keep the check name the same as the one used in the documentation.
@@ -611,11 +565,156 @@ func createDefaultLocationMessage(check *checker.CheckResult, score int) string 
 	return messageWithScore(check.Reason, score)
 }
 
+// sarifCheckEntry holds the per-check data needed for streaming SARIF output.
+type sarifCheckEntry struct {
+	check     checker.CheckResult
+	checkRule rule
+	minScore  int
+	enabled   bool
+	ruleIndex int
+}
+
 func toolName(opts *options.Options) string {
 	if opts.IsInternalGitHubIntegrationEnabled() {
 		return strings.TrimSpace(os.Getenv("SCORECARD_INTERNAL_GITHUB_SARIF_TOOL_NAME"))
 	}
 	return "scorecard"
+}
+
+// writeSarifToWriter streams SARIF 2.1.0 JSON to writer.
+// The envelope and run headers are written as literal strings; result structs
+// are marshaled one at a time and never accumulated into a single slice.
+func writeSarifToWriter(
+	writer io.Writer,
+	categorizedChecks map[string][]sarifCheckEntry,
+	showDetails bool,
+	opts *options.Options,
+	scorecardVersion, scorecardCommitSHA string,
+	date time.Time,
+) error {
+	categories := make([]string, 0, len(categorizedChecks))
+	for k := range categorizedChecks {
+		categories = append(categories, k)
+	}
+	sort.Strings(categories)
+
+	bw := bufio.NewWriter(writer)
+
+	//nolint:lll
+	_, _ = bw.WriteString("{\n   \"$schema\": \"https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json\",\n   \"version\": \"2.1.0\",\n   \"runs\": [\n")
+
+	for i, category := range categories {
+		if i > 0 {
+			_, _ = bw.WriteString(",\n")
+		}
+
+		entries := categorizedChecks[category]
+
+		// Collect rules for this run (bounded by number of checks, not findings).
+		categoryRules := make([]rule, 0, len(entries))
+		for _, e := range entries {
+			categoryRules = append(categoryRules, e.checkRule)
+		}
+
+		// Build run header (automationDetails + tool with rules; no Results slice).
+		sarifRun := createSARIFRun("https://github.com/ossf/scorecard", toolName(opts),
+			scorecardVersion, scorecardCommitSHA, date, "supply-chain", category)
+		sarifRun.Tool.Driver.Rules = categoryRules
+
+		_, _ = bw.WriteString("      {\n")
+
+		adJSON, err := json.MarshalIndent(sarifRun.AutomationDetails, "         ", "   ")
+		if err != nil {
+			return sce.WithMessage(sce.ErrScorecardInternal, err.Error())
+		}
+		_, _ = bw.WriteString("         \"automationDetails\": ")
+		_, _ = bw.Write(adJSON)
+		_, _ = bw.WriteString(",\n")
+
+		toolJSON, err := json.MarshalIndent(sarifRun.Tool, "         ", "   ")
+		if err != nil {
+			return sce.WithMessage(sce.ErrScorecardInternal, err.Error())
+		}
+		_, _ = bw.WriteString("         \"tool\": ")
+		_, _ = bw.Write(toolJSON)
+		_, _ = bw.WriteString(",\n")
+
+		// Stream results one at a time — the full []result slice is never accumulated.
+		_, _ = bw.WriteString("         \"results\": [")
+		firstResult := true
+
+		for _, entry := range entries {
+			if !entry.enabled {
+				continue
+			}
+
+			check := entry.check
+			_, sarifCheckID := createCheckIdentifiers(check.Name)
+
+			// Unclear what to use for PartialFingerprints.
+			// GitHub only uses `primaryLocationLineHash`, which is not properly defined
+			// and Appendix B of https://docs.oasis-open.org/sarif/sarif/v2.1.0/cs01/sarif-v2.1.0-cs01.html
+			// warns about using line number for fingerprints.
+
+			locs := detailsToLocations(check.Details, showDetails, entry.minScore, check.Score)
+
+			// Note: GitHub needs at least one location to show the results.
+			// ruleIndex is the position of the corresponding rule in this run's rules slice.
+			if len(locs) == 0 {
+				// Note: this is not a valid URI but GitHub still accepts it.
+				// See https://sarifweb.azurewebsites.net/Validation to test verification.
+				locs = addDefaultLocation(locs, "no file associated with this alert")
+				msg := createDefaultLocationMessage(&check, check.Score)
+				cr := createSARIFCheckResult(entry.ruleIndex, sarifCheckID, msg, &locs[0], entry.minScore, check.Score)
+				crJSON, merr := json.MarshalIndent(cr, "            ", "   ")
+				if merr != nil {
+					return sce.WithMessage(sce.ErrScorecardInternal, merr.Error())
+				}
+				if firstResult {
+					_, _ = bw.WriteString("\n            ")
+					firstResult = false
+				} else {
+					_, _ = bw.WriteString(",\n            ")
+				}
+				_, _ = bw.Write(crJSON)
+			} else {
+				for j := range locs {
+					loc := locs[j]
+					// Use the location's message (check's detail's message) as message.
+					msg := messageWithScore(loc.Message.Text, check.Score)
+					cr := createSARIFCheckResult(entry.ruleIndex, sarifCheckID, msg, &loc, entry.minScore, check.Score)
+					crJSON, merr := json.MarshalIndent(cr, "            ", "   ")
+					if merr != nil {
+						return sce.WithMessage(sce.ErrScorecardInternal, merr.Error())
+					}
+					if firstResult {
+						_, _ = bw.WriteString("\n            ")
+						firstResult = false
+					} else {
+						_, _ = bw.WriteString(",\n            ")
+					}
+					_, _ = bw.Write(crJSON)
+				}
+			}
+		}
+
+		if firstResult {
+			_, _ = bw.WriteString("]\n")
+		} else {
+			_, _ = bw.WriteString("\n         ]\n")
+		}
+		_, _ = bw.WriteString("      }")
+	}
+
+	if len(categories) > 0 {
+		_, _ = bw.WriteString("\n")
+	}
+	_, _ = bw.WriteString("   ]\n}\n")
+
+	if err := bw.Flush(); err != nil {
+		return sce.WithMessage(sce.ErrScorecardInternal, err.Error())
+	}
+	return nil
 }
 
 // AsSARIF outputs ScorecardResult in SARIF 2.1.0 format.
@@ -628,11 +727,11 @@ func (r *ScorecardResult) AsSARIF(showDetails bool, logLevel log.Level,
 	// We only support GitHub-supported properties:
 	// see https://docs.github.com/en/code-security/secure-coding/integrating-with-code-scanning/sarif-support-for-code-scanning#supported-sarif-output-file-properties,
 	// https://github.com/microsoft/sarif-tutorials.
-	sarif := createSARIFHeader()
-	runs := make(map[string]*run)
 
+	// Pass 1: group checks by SARIF run category and pre-build rule definitions.
+	// Rule structs are small (one per check); result structs are NOT built here.
+	categorizedChecks := make(map[string][]sarifCheckEntry)
 	for _, check := range r.Checks {
-		check := check
 		doc, err := checkDocs.GetCheck(check.Name)
 		if err != nil {
 			return sce.WithMessage(sce.ErrScorecardInternal, fmt.Sprintf("GetCheck: %v: %s", err, check.Name))
@@ -648,72 +747,34 @@ func (r *ScorecardResult) AsSARIF(showDetails bool, logLevel log.Level,
 		if err != nil {
 			return sce.WithMessage(sce.ErrScorecardInternal, fmt.Sprintf("computeCategory: %v: %s", err, check.Name))
 		}
-		run := getOrCreateSARIFRun(runs, category, "https://github.com/ossf/scorecard", toolName(opts),
-			r.Scorecard.Version, r.Scorecard.CommitSHA, r.Date, "supply-chain")
 
 		// Always add rules to indicate which checks were run.
 		// We don't have so many rules, so this should not clobber the output too much.
 		// See https://github.com/github/codeql-action/issues/810.
-		rule := createSARIFRule(sarifCheckName, sarifCheckID,
+		sarifRule := createSARIFRule(sarifCheckName, sarifCheckID,
 			doc.GetDocumentationURL(r.Scorecard.CommitSHA),
 			doc.GetDescription(), doc.GetShort(), doc.GetRisk(),
 			doc.GetRemediation(), doc.GetTags())
-		run.Tool.Driver.Rules = append(run.Tool.Driver.Rules, rule)
 
 		// Check the policy configuration.
 		// Here we need to use check.Name instead of sarifCheckName since
-		// we need to original check's name.
+		// we need the original check's name.
 		minScore, enabled, err := getCheckPolicyInfo(policy, check.Name)
 		if err != nil {
 			return err
 		}
-		if !enabled {
-			continue
-		}
 
-		// Unclear what to use for PartialFingerprints.
-		// GitHub only uses `primaryLocationLineHash`, which is not properly defined
-		// and Appendix B of https://docs.oasis-open.org/sarif/sarif/v2.1.0/cs01/sarif-v2.1.0-cs01.html
-		// warns about using line number for fingerprints:
-		// "suppose the fingerprint were to include the line number where the result was located, and suppose
-		// that after the baseline was constructed, a developer inserted additional lines of code above that
-		// location. Then in the next run, the result would occur on a different line, the computed fingerprint
-		// would change, and the result management system would erroneously report it as a new result."
-
-		// Create locations.
-		locs := detailsToLocations(check.Details, showDetails, minScore, check.Score)
-
-		// Add default location if no locations are present.
-		// Note: GitHub needs at least one location to show the results.
-		// RuleIndex is the position of the corresponding rule in `run.Tool.Driver.Rules`,
-		// so it's the last position for us.
-		RuleIndex := len(run.Tool.Driver.Rules) - 1
-		if len(locs) == 0 {
-			// Note: this is not a valid URI but GitHub still accepts it.
-			// See https://sarifweb.azurewebsites.net/Validation to test verification.
-			locs = addDefaultLocation(locs, "no file associated with this alert")
-			msg := createDefaultLocationMessage(&check, check.Score)
-			cr := createSARIFCheckResult(RuleIndex, sarifCheckID, msg, &locs[0], minScore, check.Score)
-			run.Results = append(run.Results, cr)
-		} else {
-			for _, loc := range locs {
-				loc := loc
-				// Use the location's message (check's detail's message) as message.
-				msg := messageWithScore(loc.Message.Text, check.Score)
-				cr := createSARIFCheckResult(RuleIndex, sarifCheckID, msg, &loc, minScore, check.Score)
-				run.Results = append(run.Results, cr)
-			}
-		}
+		ruleIndex := len(categorizedChecks[category])
+		categorizedChecks[category] = append(categorizedChecks[category], sarifCheckEntry{
+			check:     check,
+			checkRule: sarifRule,
+			minScore:  minScore,
+			enabled:   enabled,
+			ruleIndex: ruleIndex,
+		})
 	}
 
-	// Set the sarif's runs.
-	sarif.Runs = createSARIFRuns(runs)
-
-	encoder := json.NewEncoder(writer)
-	encoder.SetIndent("", "   ")
-	if err := encoder.Encode(sarif); err != nil {
-		return sce.WithMessage(sce.ErrScorecardInternal, err.Error())
-	}
-
-	return nil
+	// Pass 2: stream the categorized data to writer.
+	return writeSarifToWriter(writer, categorizedChecks, showDetails, opts,
+		r.Scorecard.Version, r.Scorecard.CommitSHA, r.Date)
 }

@@ -1,0 +1,50 @@
+{
+   "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+   "version": "2.1.0",
+   "runs": [
+      {
+         "automationDetails": {
+            "id": "supply-chain/local-scm/ccbc59901773ab4c051dfcea0cc4201a1567abdd-17 Aug 21 18:57 +0000"
+         },
+         "tool": {
+            "driver": {
+               "name": "Scorecard",
+               "informationUri": "https://github.com/ossf/scorecard",
+               "semanticVersion": "1.2.3",
+               "rules": [
+                  {
+                     "id": "CheckName6ID",
+                     "name": "Check-Name6",
+                     "helpUri": "https://github.com/ossf/scorecard/blob/main/docs/checks.md#check-name6",
+                     "shortDescription": {
+                        "text": "Check-Name6"
+                     },
+                     "fullDescription": {
+                        "text": "short description 6"
+                     },
+                     "help": {
+                        "text": "short description 6",
+                        "markdown": "**Remediation (click \"Show more\" below)**:\n\n- not-used1\n\n- not-used2\n\n\n\n**Severity**: Low\n\n\n\n**Details**:\n\nlong description\n\n other line 6"
+                     },
+                     "defaultConfiguration": {
+                        "level": "error"
+                     },
+                     "properties": {
+                        "precision": "high",
+                        "problem.severity": "recommendation",
+                        "security-severity": "1.0",
+                        "tags": [
+                           "tag1",
+                           "tag2",
+                           "tag3",
+                           "tag 4"
+                        ]
+                     }
+                  }
+               ]
+            }
+         },
+         "results": []
+      }
+   ]
+}
