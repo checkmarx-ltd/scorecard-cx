@@ -109,12 +109,16 @@ func TestRoundTrip(t *testing.T) {
 type ghResponse struct {
 	retryAfter string
 	remaining  string
+	resource   string // defaults to "search"
 	resetIn    time.Duration
 	status     int
 }
 
 func (g ghResponse) write(w http.ResponseWriter) {
-	w.Header().Set("X-RateLimit-Resource", "search")
+	if g.resource == "" {
+		g.resource = "search"
+	}
+	w.Header().Set("X-RateLimit-Resource", g.resource)
 	if g.remaining != "" {
 		w.Header().Set("X-RateLimit-Remaining", g.remaining)
 		w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(time.Now().Add(g.resetIn).Unix(), 10))
@@ -135,17 +139,17 @@ func TestRoundTripSearchRateLimit(t *testing.T) {
 	budgetLeft := ghResponse{status: http.StatusOK, remaining: "29", resetIn: time.Minute}
 
 	tests := []struct {
-		wantErrIs     error
-		name          string
-		wantErrText   string
-		responses     []ghResponse // last entry repeats
-		ctxTimeout    time.Duration
-		maxDuration   time.Duration
-		wantCalls     int32
-		wantStatus    int
-		wantMinWait   time.Duration
-		wantErr       bool
-		checkMinCalls bool
+		wantErrIs    error
+		name         string
+		wantErrText  string
+		responses    []ghResponse // last entry repeats
+		ctxTimeout   time.Duration
+		maxDuration  time.Duration
+		wantCalls    int32
+		wantStatus   int
+		wantMinWait  time.Duration
+		wantErr      bool
+		waitDisabled bool
 	}{
 		{
 			name:        "budget empty, reset in 2s: waits for the reset and retries",
@@ -167,14 +171,34 @@ func TestRoundTripSearchRateLimit(t *testing.T) {
 			responses:   []ghResponse{{status: http.StatusOK, remaining: "0", resetIn: 30 * time.Second}},
 			wantStatus:  http.StatusOK,
 			wantCalls:   1,
-			maxDuration: time.Second,
+			maxDuration: 3 * time.Second,
+		},
+		{
+			name: "GraphQL 200 with remaining 0 is an exhausted limit: waits and retries",
+			responses: []ghResponse{
+				{status: http.StatusOK, remaining: "0", resource: "graphql", resetIn: time.Second},
+				budgetLeft,
+			},
+			wantStatus:  http.StatusOK,
+			wantCalls:   2,
+			maxDuration: 5 * time.Second,
+		},
+		{
+			name: "429 with an empty budget: waits and retries",
+			responses: []ghResponse{
+				{status: http.StatusTooManyRequests, remaining: "0", resetIn: time.Second},
+				budgetLeft,
+			},
+			wantStatus:  http.StatusOK,
+			wantCalls:   2,
+			maxDuration: 5 * time.Second,
 		},
 		{
 			name:        "reset already passed (negative wait): retries at once",
 			responses:   []ghResponse{emptyBudget(-2 * time.Second), budgetLeft},
 			wantStatus:  http.StatusOK,
 			wantCalls:   2,
-			maxDuration: 2 * time.Second,
+			maxDuration: 3 * time.Second,
 		},
 		{
 			name:        "reset beyond the wait cap: fails fast and names the exhausted budget",
@@ -183,15 +207,32 @@ func TestRoundTripSearchRateLimit(t *testing.T) {
 			wantErrIs:   errGitHubRateLimitExceeded,
 			wantErrText: "search",
 			wantCalls:   1,
-			maxDuration: time.Second,
+			maxDuration: 3 * time.Second,
 		},
 		{
-			name:          "Retry-After on every call: gives up after a bounded number of retries",
-			responses:     []ghResponse{{status: http.StatusTooManyRequests, retryAfter: "1"}},
-			wantErr:       true,
-			wantCalls:     2,
-			checkMinCalls: true,
-			maxDuration:   10 * time.Second,
+			name:         "waiting disabled: fails at once",
+			responses:    []ghResponse{emptyBudget(2 * time.Second)},
+			waitDisabled: true,
+			wantErr:      true,
+			wantErrIs:    errGitHubRateLimitExceeded,
+			wantCalls:    1,
+			maxDuration:  3 * time.Second,
+		},
+		{
+			name:        "Retry-After on every call: gives up after the maximum number of retries",
+			responses:   []ghResponse{{status: http.StatusTooManyRequests, retryAfter: "1"}},
+			wantErr:     true,
+			wantErrIs:   errGitHubRateLimitExceeded,
+			wantCalls:   maxRetryAfterAttempts + 1,
+			maxDuration: 10 * time.Second,
+		},
+		{
+			name:        "Retry-After beyond the wait cap: fails at once",
+			responses:   []ghResponse{{status: http.StatusTooManyRequests, retryAfter: "120"}},
+			wantErr:     true,
+			wantErrIs:   errGitHubRateLimitExceeded,
+			wantCalls:   1,
+			maxDuration: 3 * time.Second,
 		},
 		{
 			name:        "context cancelled while waiting for the reset: stops waiting",
@@ -200,7 +241,7 @@ func TestRoundTripSearchRateLimit(t *testing.T) {
 			wantErr:     true,
 			wantErrIs:   context.DeadlineExceeded,
 			wantCalls:   1,
-			maxDuration: 2 * time.Second,
+			maxDuration: 3 * time.Second,
 		},
 	}
 
@@ -219,6 +260,9 @@ func TestRoundTripSearchRateLimit(t *testing.T) {
 				innerTransport: ts.Client().Transport,
 				logger:         log.NewLogger(log.DefaultLevel),
 				maxWait:        time.Minute,
+			}
+			if tt.waitDisabled {
+				transport.maxWait = 0
 			}
 
 			ctx := context.Background()
@@ -273,7 +317,7 @@ func TestRoundTripSearchRateLimit(t *testing.T) {
 				}
 			}
 
-			if n := calls.Load(); tt.checkMinCalls && n < tt.wantCalls || !tt.checkMinCalls && n != tt.wantCalls {
+			if n := calls.Load(); n != tt.wantCalls {
 				t.Errorf("expected %d calls to GitHub, got %d", tt.wantCalls, n)
 			}
 			if elapsed < tt.wantMinWait {

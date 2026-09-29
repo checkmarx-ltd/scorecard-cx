@@ -79,7 +79,11 @@ func (gh *rateLimitTransport) RoundTrip(r *http.Request) (*http.Response, error)
 	return gh.roundTrip(r, 0, 0)
 }
 
-func (gh *rateLimitTransport) roundTrip(r *http.Request, waited time.Duration, retries int) (*http.Response, error) {
+func (gh *rateLimitTransport) roundTrip(
+	r *http.Request,
+	waited time.Duration,
+	retryAfterAttempts int,
+) (*http.Response, error) {
 	// Inner transports add the Authorization header to the request, so each attempt sends a copy.
 	resp, err := gh.innerTransport.RoundTrip(r.Clone(r.Context()))
 	if err != nil {
@@ -90,17 +94,18 @@ func (gh *rateLimitTransport) roundTrip(r *http.Request, waited time.Duration, r
 	if retryAfter, err := strconv.Atoi(retryValue); err == nil { // if NO error
 		stats.Record(r.Context(), githubstats.RetryAfter.M(int64(retryAfter)))
 		duration := time.Duration(retryAfter) * time.Second
-		if retries >= maxRetryAfterAttempts || waited+duration > gh.maxWait {
-			resp.Body.Close()
-			return nil, fmt.Errorf("%w for %s: wait %s to retry",
-				errGitHubRateLimitExceeded, resp.Header.Get("X-RateLimit-Resource"), duration)
+		if err := resp.Body.Close(); err != nil {
+			return nil, fmt.Errorf("closing response body: %w", err)
+		}
+		if retryAfterAttempts >= maxRetryAfterAttempts || waited+duration > gh.maxWait {
+			return nil, rateLimitError(resp, duration)
 		}
 		gh.logger.Info(fmt.Sprintf("Retry-After header set. Waiting %s to retry...", duration))
-		if err := gh.wait(r.Context(), resp, duration); err != nil {
+		if err := wait(r.Context(), duration); err != nil {
 			return nil, err
 		}
 		gh.logger.Info("Retry-After header set. Retrying...")
-		return gh.retry(r, waited+duration, retries+1)
+		return gh.retry(r, waited+duration, retryAfterAttempts+1)
 	}
 
 	rateLimit := resp.Header.Get("X-RateLimit-Remaining")
@@ -111,40 +116,49 @@ func (gh *rateLimitTransport) roundTrip(r *http.Request, waited time.Duration, r
 	}
 	ctx, err := tag.New(r.Context(), tag.Upsert(githubstats.ResourceType, resp.Header.Get("X-RateLimit-Resource")))
 	if err != nil {
-		return nil, fmt.Errorf("error updating context: %w", err)
+		return nil, errors.Join(fmt.Errorf("error updating context: %w", err), resp.Body.Close())
 	}
 	stats.Record(ctx, githubstats.RemainingTokens.M(int64(remaining)))
 
-	// A 200 that used the last slot is still a success.
-	if remaining <= 0 && (resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests) {
+	// A REST 200 that used the last slot is still a success. GraphQL reports an exhausted limit with a 200.
+	lastSlot := resp.StatusCode == http.StatusOK && resp.Header.Get("X-RateLimit-Resource") != "graphql"
+	if remaining <= 0 && !lastSlot {
 		reset, err := strconv.Atoi(resp.Header.Get("X-RateLimit-Reset"))
 		if err != nil {
 			//nolint:nilerr // just an error in metadata, response may still be useful?
 			return resp, nil
 		}
 
-		duration := max(time.Until(time.Unix(int64(reset), 0)), 0)
-		if waited+duration > gh.maxWait {
-			resp.Body.Close()
-			return nil, fmt.Errorf("%w for %s: wait %s to retry",
-				errGitHubRateLimitExceeded, resp.Header.Get("X-RateLimit-Resource"), duration)
+		if err := resp.Body.Close(); err != nil {
+			return nil, fmt.Errorf("closing response body: %w", err)
 		}
+		duration := max(time.Until(time.Unix(int64(reset), 0)), 0)
 		if gh.maxJitter > 0 {
 			duration += rand.N(gh.maxJitter) //nolint:gosec // spreading retries needs no cryptographic randomness
 		}
-		gh.logger.Info(fmt.Sprintf("Rate limit exceeded. Waiting %s to retry...", duration))
-		if err := gh.wait(r.Context(), resp, duration); err != nil {
+		if waited+duration > gh.maxWait {
+			return nil, rateLimitError(resp, duration)
+		}
+		gh.logger.Info(fmt.Sprintf("Rate limit exceeded. Waiting %s to retry...", duration.Round(time.Millisecond)))
+		if err := wait(r.Context(), duration); err != nil {
 			return nil, err
 		}
 		gh.logger.Info("Rate limit exceeded. Retrying...")
-		return gh.retry(r, waited+duration, retries)
+		return gh.retry(r, waited+duration, retryAfterAttempts)
 	}
 
 	return resp, nil
 }
 
-func (gh *rateLimitTransport) wait(ctx context.Context, resp *http.Response, duration time.Duration) error {
-	resp.Body.Close()
+func rateLimitError(resp *http.Response, duration time.Duration) error {
+	resource := resp.Header.Get("X-RateLimit-Resource")
+	if resource == "" {
+		resource = "unknown"
+	}
+	return fmt.Errorf("%w for %s: wait %s to retry", errGitHubRateLimitExceeded, resource, duration.Round(time.Second))
+}
+
+func wait(ctx context.Context, duration time.Duration) error {
 	timer := time.NewTimer(duration)
 	defer timer.Stop()
 	select {
@@ -156,8 +170,15 @@ func (gh *rateLimitTransport) wait(ctx context.Context, resp *http.Response, dur
 }
 
 // retry sends r again, replaying the body the previous attempt consumed.
-func (gh *rateLimitTransport) retry(r *http.Request, waited time.Duration, retries int) (*http.Response, error) {
-	if r.GetBody != nil {
+func (gh *rateLimitTransport) retry(
+	r *http.Request,
+	waited time.Duration,
+	retryAfterAttempts int,
+) (*http.Response, error) {
+	if r.Body != nil && r.Body != http.NoBody {
+		if r.GetBody == nil {
+			return nil, sce.WithMessage(sce.ErrScorecardInternal, "cannot retry a request whose body cannot be replayed")
+		}
 		body, err := r.GetBody()
 		if err != nil {
 			return nil, sce.WithMessage(sce.ErrScorecardInternal, fmt.Sprintf("GetBody: %v", err))
@@ -165,5 +186,5 @@ func (gh *rateLimitTransport) retry(r *http.Request, waited time.Duration, retri
 		r = r.Clone(r.Context())
 		r.Body = body
 	}
-	return gh.roundTrip(r, waited, retries)
+	return gh.roundTrip(r, waited, retryAfterAttempts)
 }
