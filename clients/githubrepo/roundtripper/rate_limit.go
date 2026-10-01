@@ -36,7 +36,7 @@ const (
 	// Total wait allowed per request, as a duration (e.g. "2m"). "0" disables waiting.
 	maxRateLimitWaitEnv     = "GITHUB_RATE_LIMIT_MAX_WAIT"
 	defaultMaxRateLimitWait = 2 * time.Minute
-	defaultRetryJitter      = 5 * time.Second
+	retryJitter             = 5 * time.Second
 	maxRetryAfterAttempts   = 5
 )
 
@@ -48,7 +48,7 @@ func MakeRateLimitedTransport(innerTransport http.RoundTripper, logger *log.Logg
 		logger:         logger,
 		innerTransport: innerTransport,
 		maxWait:        maxRateLimitWaitFromEnv(logger),
-		maxJitter:      defaultRetryJitter,
+		maxJitter:      retryJitter,
 	}
 }
 
