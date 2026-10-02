@@ -26,7 +26,7 @@ jobs:
     runs-on: cx-public-ubuntu-x64
     env:
       CGO_ENABLED: "0"
-      GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout (branch that triggered the run)
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
