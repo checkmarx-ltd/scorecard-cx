@@ -268,6 +268,10 @@ checks:
       This check determines whether the project has earned an [OpenSSF (formerly CII) Best Practices Badge](https://www.bestpractices.dev/) at the passing, silver, or gold level.
       The OpenSSF Best Practices badge indicates whether or not that the project uses a set of security-focused best development practices for open
       source software. The check uses the URL for the Git repo and the OpenSSF Best Practices badge API.
+      The badge API (`www.bestpractices.dev`) is queried once per scan, at scan time.
+      Rate limits, server errors and HTML replies are retried for up to 2 minutes by default (`CII_BEST_PRACTICES_MAX_WAIT`).
+      If the API still cannot be reached, replies with an error status, or its reply is not valid JSON, the check reports a runtime error.
+      The error includes the reply's HTTP status, content type and the start of its body.
 
       The OpenSSF Best Practices badge has 3 tiers: passing, silver, and gold. We give
       full credit to projects that meet the [gold criteria](https://www.bestpractices.dev/criteria/2), which is a significant achievement for projects and requires multiple developers in the project.
@@ -408,6 +412,10 @@ checks:
       into a program to expose bugs. Regular fuzzing is important to detect
       vulnerabilities that may be exploited by others, especially since attackers can
       also use fuzzing to find the same flaws.
+
+      The OSS-Fuzz project list is downloaded at scan time from `oss-fuzz-build-logs.storage.googleapis.com`.
+      Rate limits and server errors are retried for up to 2 minutes by default (`OSS_FUZZ_STATUS_MAX_WAIT`).
+      If the file still cannot be downloaded or parsed, the check reports a runtime error.
 
       Note: A project that fulfills this criterion with other tools may still receive
       a low score on this test. There are many ways to implement fuzzing, and it is
