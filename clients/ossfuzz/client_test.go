@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ossf/scorecard/v4/clients"
@@ -180,13 +181,45 @@ func TestClientEager(t *testing.T) {
 	}
 }
 
+func TestClientRetriesServerError(t *testing.T) {
+	t.Parallel()
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		b, err := os.ReadFile("./testdata/status.json")
+		if err != nil {
+			t.Errorf("os.ReadFile: %v", err)
+			return
+		}
+		//nolint:errcheck
+		w.Write(b)
+	}))
+	t.Cleanup(server.Close)
+
+	c := CreateOSSFuzzClient(server.URL + "/status.json")
+	resp, err := c.Search(clients.SearchRequest{Query: "github.com/ossf/scorecard"})
+	if err != nil {
+		t.Fatalf("Search() error = %v, want the server error to be retried", err)
+	}
+	if resp.Hits != 1 {
+		t.Errorf("Search() hits = %d, want 1", resp.Hits)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Errorf("server got %d requests, want 2", got)
+	}
+}
+
 func setupServer(t *testing.T) string {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, err := os.ReadFile("./testdata" + r.URL.Path)
 		if err != nil {
+			// A missing object is a 404 on Google Cloud Storage, which is not retried.
 			t.Logf("os.ReadFile: %v", err)
-			w.WriteHeader(http.StatusInternalServerError)
+			w.WriteHeader(http.StatusNotFound)
 			return
 		}
 		w.WriteHeader(http.StatusOK)

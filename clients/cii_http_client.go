@@ -19,46 +19,54 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
+
+	"github.com/ossf/scorecard/v4/clients/internal/httpretry"
 )
 
-var errTooManyRequests = errors.New("failed after exponential backoff")
+const (
+	// ciiMaxWaitEnv caps the total wait between retries of one badge request, as a Go
+	// duration (e.g. "2m"). "0" disables retries.
+	ciiMaxWaitEnv = "CII_BEST_PRACTICES_MAX_WAIT"
+	// maxResponseBodyShown caps how much of an unexpected reply's body goes into an error.
+	maxResponseBodyShown = 256
+)
+
+var errUnexpectedStatus = errors.New("unexpected status from the OpenSSF Best Practices API")
 
 // httpClientCIIBestPractices implements the CIIBestPracticesClient interface.
-// A HTTP client with exponential backoff is used to communicate with the CII Best Practices servers.
-type httpClientCIIBestPractices struct{}
-
-type expBackoffTransport struct {
-	numRetries uint8
+// Rate limits, server errors and HTML pages are retried within maxWait.
+type httpClientCIIBestPractices struct {
+	transport http.RoundTripper
+	maxWait   time.Duration
 }
 
-func (transport *expBackoffTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	for i := 0; i < int(transport.numRetries); i++ {
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil || resp.StatusCode != http.StatusTooManyRequests {
-			//nolint:wrapcheck
-			return resp, err
-		}
-		time.Sleep(time.Duration(math.Pow(2, float64(i))) * time.Second)
-	}
-	return nil, errTooManyRequests
+// newHTTPClientCIIBestPractices returns a client whose retry budget comes from ciiMaxWaitEnv.
+func newHTTPClientCIIBestPractices() *httpClientCIIBestPractices {
+	return &httpClientCIIBestPractices{maxWait: httpretry.MaxWaitFromEnv(ciiMaxWaitEnv)}
+}
+
+// retryableBadgeReply reports whether a reply is worth retrying. The API only answers with
+// JSON, so an HTML page is an error or maintenance page served in front of it.
+func retryableBadgeReply(resp *http.Response) bool {
+	return httpretry.RetryableStatus(resp) ||
+		strings.HasPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "text/html")
 }
 
 // GetBadgeLevel implements CIIBestPracticesClient.GetBadgeLevel.
 func (client *httpClientCIIBestPractices) GetBadgeLevel(ctx context.Context, uri string) (BadgeLevel, error) {
-	repoURI := fmt.Sprintf("https://%s", uri)
-	url := fmt.Sprintf("https://www.bestpractices.dev/projects.json?url=%s", repoURI)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	// The escaped form is what the API redirects an unescaped query to, so it saves a request.
+	badgeURL := "https://www.bestpractices.dev/projects.json?url=" + url.QueryEscape("https://"+uri)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, badgeURL, nil)
 	if err != nil {
 		return Unknown, fmt.Errorf("error during http.NewRequestWithContext: %w", err)
 	}
 
 	httpClient := http.Client{
-		Transport: &expBackoffTransport{
-			numRetries: 3,
-		},
+		Transport: httpretry.New(client.transport, client.maxWait, retryableBadgeReply),
 	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -71,12 +79,27 @@ func (client *httpClientCIIBestPractices) GetBadgeLevel(ctx context.Context, uri
 		return Unknown, fmt.Errorf("error during io.ReadAll: %w", err)
 	}
 
+	// The status and the start of the body are kept in the error so an unexpected reply,
+	// such as an HTML error page, can be identified from the logs.
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return Unknown, fmt.Errorf("%w: %s", errUnexpectedStatus, describeResponse(resp, jsonData))
+	}
+
 	parsedResponse, err := ParseBadgeResponseFromJSON(jsonData)
 	if err != nil {
-		return Unknown, fmt.Errorf("error during json parsing: %w", err)
+		return Unknown, fmt.Errorf("error during json parsing: %w (%s)", err, describeResponse(resp, jsonData))
 	}
 	if len(parsedResponse) < 1 {
 		return NotFound, nil
 	}
 	return parsedResponse[0].getBadgeLevel()
+}
+
+// describeResponse summarizes a reply as its status, content type and the start of its body.
+func describeResponse(resp *http.Response, body []byte) string {
+	shown := string(body)
+	if len(body) > maxResponseBodyShown {
+		shown = string(body[:maxResponseBodyShown]) + "..."
+	}
+	return fmt.Sprintf("HTTP %d, Content-Type %q, body %q", resp.StatusCode, resp.Header.Get("Content-Type"), shown)
 }

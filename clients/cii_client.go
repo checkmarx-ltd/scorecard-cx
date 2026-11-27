@@ -64,7 +64,7 @@ type CIIBestPracticesClient interface {
 
 // DefaultCIIBestPracticesClient returns http-based implementation of the interface.
 func DefaultCIIBestPracticesClient() CIIBestPracticesClient {
-	return &httpClientCIIBestPractices{}
+	return newHTTPClientCIIBestPractices()
 }
 
 // BlobCIIBestPracticesClient returns a blob-based implementation of the interface.

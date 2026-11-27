@@ -277,6 +277,22 @@ GITHUB_APP_ID=<app id>
 These variables can be obtained from the GitHub
 [developer settings](https://github.com/settings/apps) page.
 
+##### GitHub rate limits
+
+When a GitHub rate limit is exhausted, Scorecard waits until the limit resets, plus a random delay of up to 5 seconds, and retries the request.
+`GITHUB_RATE_LIMIT_MAX_WAIT` caps the total wait per request as a Go duration (default `2m`, `0` disables waiting).
+If the reset is further away than the remaining wait, the request fails with an error that names the exhausted limit, for example `github rate limit exceeded for search: wait 45s to retry`.
+Responses with a `Retry-After` header are retried at most 5 times within the same cap.
+
+##### OpenSSF Best Practices and OSS-Fuzz requests
+
+The CII-Best-Practices and Fuzzing checks retry their requests to `www.bestpractices.dev` and to the OSS-Fuzz status file after a network error, an HTTP 429 or an HTTP 5xx reply.
+CII-Best-Practices also retries an HTML reply, because the badge API only answers with JSON.
+A retry waits for the `Retry-After` header when the reply has one (at most 5 times), otherwise for an exponential backoff from 1 second up to 30 seconds, plus a random delay of up to 5 seconds.
+Each attempt times out after 30 seconds.
+`CII_BEST_PRACTICES_MAX_WAIT` and `OSS_FUZZ_STATUS_MAX_WAIT` cap how long one request keeps retrying, counting both the waits and the attempts, as a Go duration (default `2m`, `0` disables retries).
+When the cap is reached, the check reports a runtime error with the last reply's HTTP status, or the last network error.
+
 #### Basic Usage
 
 ##### Using repository URL
